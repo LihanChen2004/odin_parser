@@ -8,6 +8,8 @@ The binary formats and coordinate conventions are defined by the Odin1 ROS
 driver (ManifoldTech's `odin_ros_driver`, shipped with the device SDK); see
 [`docs/`](docs/) for the details.
 
+https://github.com/user-attachments/assets/1805f3f0-2b13-4ccd-a253-be46c2ce1f88
+
 ## Installation
 
 Requires `uv` (or Python >= 3.11 + pip):
