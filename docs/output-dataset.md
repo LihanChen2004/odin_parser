@@ -12,7 +12,7 @@ processed/<run>/
 │       ├── intrinsics.json       # static intrinsics + distortion + static Tcl_0
 │       ├── tcl_frames.json       # per-frame online lidar<->camera extrinsics
 │       ├── poses.json            # camera poses in the world frame
-│       ├── masks/                # per-frame LiDAR/RGB validity mask (0/1)
+│       ├── masks/                # per-frame LiDAR/RGB validity mask (0/255 PNG)
 │       ├── confidence/           # per-frame alpha confidence map (float16 [0,1])
 │       └── 00000.jpg .. NNNNN.jpg
 └── lidar/
@@ -23,9 +23,9 @@ processed/<run>/
 Per-frame files use the same **5-digit zero-padded index**, so frame `k` is
 `index == k` in every `poses.json` array.
 
-Masks and confidence are emitted by default (`--generate-masks` /
-`ProcessOptions.generate_masks`, default `True`); the flag also accepts a
-`--no-mask`/`generate_masks=False` to skip them.  The number of files matches
+Masks and confidence are emitted by default (`--masks` /
+`ProcessOptions.generate_masks`, default `True`); pass `--no-masks`
+(`generate_masks=False`) to skip them.  The number of files matches
 `num_frames`.
 
 ## Conventions
@@ -61,9 +61,10 @@ Masks and confidence are emitted by default (`--generate-masks` /
 
 ### `camera/front_camera/masks/NNNNN.png`
 
-A **binary PNG** (0/1, `L` mode) defining the LiDAR/RGB valid region in the
-image.  Pixel `1` = the projected LiDAR dToF coverage; `0` = the surrounding
-margin where LiDAR and RGB do not overlap.
+A **binary PNG** (`L` mode) defining the LiDAR/RGB valid region in the image.
+Non-zero pixels mark the projected LiDAR dToF coverage; zero marks the
+surrounding margin where LiDAR and RGB do not overlap.  (Stored as 0/255 at the
+file level; `OdinDataset.mask()` returns it as a boolean array.)
 
 - Computed as the **convex hull** of the projected cloud points (see
   `masks.py::fov_mask`), filled and rasterised at the full image size.
@@ -121,8 +122,11 @@ v = A22 * Y * thd/r + v0
 
 ### `camera/front_camera/tcl_frames.json`
 
-One entry per frame (ordered): `{index, timestamp, Tcl_0, body_T_lidar}`.
+One entry per frame (ordered): `{index, cloud_index, timestamp, Tcl_0,
+body_T_lidar}`.
 
+- `index` : the output frame number `k` (matches the per-frame file suffix);
+  `cloud_index` is the source SLAM cloud frame it came from.
 - `Tcl_0` : 4x4 `lidar -> camera` (`p_cam = Tcl_0 @ p_lidar`), the online value.
 - `body_T_lidar` : 4x4 `lidar -> imu`.
 
@@ -131,9 +135,13 @@ update over time and are more accurate.
 
 ### `camera/front_camera/poses.json`
 
-One entry per frame (ordered by index): `{index, timestamp, image_index,
+One entry per frame (ordered): `{index, cloud_index, timestamp, image_index,
 position, quaternion, matrix}`.
 
+- `index` : the output frame number `k`; it matches the per-frame file suffix
+  (`NNNNN.jpg`, `NNNNN.pkl.gz`).
+- `cloud_index` / `image_index` : the source SLAM cloud and image frames this
+  output frame was built from.
 - `matrix` : 4x4 `T_wc` (world-from-camera), row-major.
 - `position` / `quaternion` : the same pose.
 - `T_wc = T_wi * body_T_lidar * inv(Tcl_0)` where `T_wi` is the odometry pose
@@ -184,7 +192,7 @@ for k in range(len(ds)):
 
     # optional LiDAR/RGB validity + confidence (present when masks were written)
     mask = ds.mask(k)  # bool HxW, 1 = LiDAR/RGB overlap
-    conf = ds.confidence(k)  # float32 HxW in [0,1]
+    conf = ds.confidence(k)  # float16 HxW in [0,1]
 ```
 
 Cloud points are world-frame and camera poses are world-from-camera, so you can

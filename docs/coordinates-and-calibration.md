@@ -17,7 +17,8 @@ package emits.
 
 `T_a_b` maps points from frame `b` into frame `a`: `p_a = T_a_b @ [p_b; 1]`.
 
-- `T_wi` : `odom -> imu`, from `OdinPose.bin` (position in m, unit quaternion).
+- `T_wi` : `imu -> odom` (world-from-imu), from `OdinPose.bin` (position in m,
+  unit quaternion).
 - `T_il` : `lidar -> imu` = `body_T_lidar` in `calib_online.yaml`.
 - `T_cl` : `lidar -> camera` = `Tcl_0` in `calib_online.yaml`
   (i.e. the camera pose expressed in the lidar frame, `p_cam = T_cl @ p_lidar`).

@@ -38,7 +38,7 @@ offset  size  type    field
 12      4     float32 x   (metres)
 16      4     float32 y
 20      4     float32 z
-24      16    4xfloat32 qx,qy,qz,qw  (unit quaternion, world->imu)
+24      16    4xfloat32 qx,qy,qz,qw  (unit quaternion, world-from-imu)
 ```
 
 From `publishOdometry` (`LIDAR_DT_SLAM_ODOMETRY`).  The logged stream already

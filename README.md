@@ -1,5 +1,9 @@
 # odin-parser
 
+[![CI](https://github.com/LihanChen2004/odin_parser/actions/workflows/ci.yml/badge.svg)](https://github.com/LihanChen2004/odin_parser/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
 A parser for the **ManifoldTech Odin1** device's private binary recording
 format, converting a recording into a PandaSet-style layout suitable for
 [gsplat](https://www.gsplat.studio/).
@@ -12,11 +16,21 @@ https://github.com/user-attachments/assets/1805f3f0-2b13-4ccd-a253-be46c2ce1f88
 
 ## Installation
 
-Requires `uv` (or Python >= 3.11 + pip):
+Requires `uv` (or Python >= 3.11 + pip). Tested on Python 3.11 and 3.12:
 
 ```bash
 uv sync                  # creates .venv with Python 3.11
 uv run odin-parser --help
+```
+
+## Development
+
+```bash
+uv sync                              # create .venv with the dev dependencies
+uv run pytest -q                     # run the test suite
+uvx ruff check src tests scripts     # lint
+uvx ruff format src tests scripts    # format
+pre-commit install                   # optional: run the hooks on every commit
 ```
 
 ## Pipeline
@@ -128,6 +142,10 @@ Twl = ds.lidar_pose(0)  # 4x4 world_from_lidar
 - [`docs/validation.md`](docs/validation.md) - how alignment/extrinsics are checked.
 - [`docs/raw-data-analysis.md`](docs/raw-data-analysis.md) - what is recorded vs what the device exposes.
 - [`docs/ros-driver-notes.md`](docs/ros-driver-notes.md) - reference to the driver source.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).
 
 ## Disclaimer
 

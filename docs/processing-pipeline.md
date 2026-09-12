@@ -4,17 +4,26 @@ Design of `odin_parser.process.process_dataset`.
 
 ## Architecture
 
-The pipeline is split into three layers:
+`process_dataset` only wires the pieces together; the work lives in:
 
-- `odin_parser.recording.OdinRecording` - random-access view of a raw
-  recording.  It lazily builds **one** header index (TOC) per stream and reuses
-  it for time alignment, random access, pose interpolation and frame iteration,
-  so a stream's header is never scanned more than once.
-- `odin_parser.sync` - cross-sensor time-offset estimator (colour coherence).
-- `odin_parser.output.write_dataset` - the PandaSet-style writer and on-disk
-  schema (read back by `odin_parser.dataset.OdinDataset`).
+| module | responsibility |
+|--------|----------------|
+| `streams` | binary readers.  `iter_frame_spans` frames any header-prefixed stream and backs both the one-pass generators (`read_*_stream`) and the random-access TOCs (`build_*_toc` + `*Index`). |
+| `recording` | `OdinRecording`, a random-access view of a raw recording.  Builds one header index (TOC) per stream and reuses it for alignment, random access, pose interpolation and frame iteration, so a stream's header is scanned once. |
+| `calib` | parsers for `image/cam_in_ex.txt`, `image/info.txt` and `calib_online.yaml` (intrinsics and static/online extrinsics). |
+| `camera` | `PolynomialCamera`, the equidistant projection model. |
+| `geometry` | SE(3) and quaternion helpers. |
+| `align` | timestamp-based cloud<->image matching. |
+| `sync` | cross-sensor pose time-offset estimator (colour coherence). |
+| `masks` | per-frame LiDAR/RGB validity mask and alpha confidence map. |
+| `output` | `write_dataset`, the PandaSet-style writer and on-disk schema. |
+| `dataset` | `OdinDataset`, which reads a processed tree back. |
+| `visualize` | point-cloud projection and overlay rendering. |
+| `cli` | the `odin-parser info\|process\|preview` entry point. |
+| `process` | `ProcessOptions` and `process_dataset`, which wire the above. |
 
-`process_dataset` only wires these together.
+`docs/output-dataset.md` is the schema reference and
+`docs/coordinates-and-calibration.md` the frame/transform reference.
 
 ## Goals
 
@@ -33,7 +42,7 @@ clouds converted to `(N,7)` float32 and gzipped per frame, plus JSON metadata
 (`poses.json`, `intrinsics.json`, `tcl_frames.json`, `dataset_info.json`).
 Per-frame `masks/` (LiDAR/RGB validity, PNG) and `confidence/` (alpha
 reliability, float16 `.npy`) are also written when masks are enabled
-(`--generate-masks`).
+(`--masks`, the default).
 
 ## Steps
 
@@ -61,14 +70,33 @@ reliability, float16 `.npy`) are also written when masks are enabled
 ## Memory / performance notes
 
 - One streaming pass per payload file; the header index is built once.
-- Header-only alignment/TOC passes `f.seek(payload, 1)` and never load payloads.
+- `iter_frame_spans` walks a stream header-only (seeking past each payload) and
+  backs both the TOC and the streaming readers, so payloads are never loaded
+  just to index a stream.
 - Per-frame numpy arrays are transient (~34k x 16 bytes raw); peak RSS stays in
   the tens of MB per worker.
-- The write stage is embarrassingly parallel (frames are independent); the
-  dominant per-frame costs are the confidence Gaussian smoothing and PNG
-  compression, which parallelise across `--workers` processes.  A ~3900-frame
-  recording exports in a few minutes on an 8-worker setup (NAS-bound at
-  ~15-20 MB/s).
+
+### Cost profile
+
+The write stage is embarrassingly parallel (frames are independent) and is
+**CPU-bound, not IO-bound**.  A representative 1005-frame recording
+(1600x1296, ~37k points/frame) costs ~98 s wall on 8 workers at ~590% CPU,
+nearly all of it in the write stage (TOC + align ~0.03 s, pose-offset estimate
+~2.8 s).  The dominant per-frame costs are:
+
+| step | ms/frame | note |
+|------|----------|------|
+| `confidence_map` (Gaussian, sigma=40) | ~310 | dominant; kernel radius ~160 px |
+| `gzip` pickled cloud (level 9, the default) | ~180 | level 1 ~13 ms, level 6 ~32 ms |
+| `fov_mask` | ~9 | |
+| `np.save` float16 confidence | ~5 | 4.15 MB/frame -> ~4 GB per 1000 frames |
+| cloud read + decode | ~0.6 | |
+
+Output volume is ~4.9 GB per 1000 frames, ~80% of it float16 confidence maps.
+The NFS mount sustains ~240 MB/s read and ~113 MB/s write while the pipeline
+reaches ~70 MB/s of writes, so storage bandwidth is not the limiter.
+`--no-masks` skips the Gaussian and the confidence maps, removing the two
+largest costs.
 
 ## Extending
 
@@ -77,4 +105,6 @@ reliability, float16 `.npy`) are also written when masks are enabled
   `binary-format.md`).
 - Add the `OdinRotate.bin` (WIWC) orientation to a pose file by using
   `read_rotate_stream` (index-aligned with odometry).
-- Produce undistorted images with `PolynomialCamera`'s inverse distortion.
+- Add an inverse of `PolynomialCamera.world_to_pixel` (an iterative `cam2world`)
+  to undistort images; the forward projection model exists, the inverse does
+  not yet.
