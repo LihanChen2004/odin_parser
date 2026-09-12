@@ -103,3 +103,28 @@ def test_parse_info(tmp_path):
     info = parse_info(p)
     assert info["device"] == "OdinOne"
     assert info["created_at"] == "20260424_231347"
+
+
+def test_parse_online_calib_crlf(tmp_path):
+    # A CRLF calib_online.yaml must still split into one block per frame;
+    # otherwise YAML collapses the repeated `frame:` keys to the last one.
+    block = (
+        "frame:\n"
+        "    index: {i}\n"
+        "    timestamp: {ts}\n"
+        "    cam_num: 1\n"
+        "    Tcl_0: [{tcl}]\n"
+        "    body_T_lidar: [{til}]\n"
+    )
+    eye = (
+        "1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0"
+    )
+    text = "".join(
+        block.format(i=i, ts=float(i), tcl=eye, til=eye) for i in range(3)
+    ).replace("\n", "\r\n")
+    p = tmp_path / "calib_online.yaml"
+    p.write_bytes(text.encode())
+
+    frames = parse_online_calib(p)
+    assert set(frames) == {0, 1, 2}
+    assert np.allclose(frames[2].body_T_lidar, np.eye(4))

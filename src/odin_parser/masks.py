@@ -25,13 +25,11 @@ from .visualize import project_world_points
 
 # Gaussian smoothing sigma (px) used to spread sparse alpha into a dense field.
 DEFAULT_SIGMA = 40.0
-# Lower confidence threshold that counts as "valid" when binarising.
-# Not used by default; kept for callers that want a boolean confidence mask.
 
 
 def _project_valid(
     points, T_cam_world, camera: PolynomialCamera, width, height, max_depth
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """Project world-frame points; return fractional camera pixel coords + points.
 
     Uses the exact same projection as the preview/overlay renderer
@@ -53,7 +51,7 @@ def fov_mask(
     width: int,
     height: int,
     max_depth: float = 200.0,
-) -> tuple:
+) -> tuple[np.ndarray, np.ndarray | None]:
     """LiDAR coverage region as a boolean (H,W) mask.
 
     Returns ``(mask, uv)`` where ``uv`` are the projected pixel coords used to
@@ -64,7 +62,7 @@ def fov_mask(
         return np.zeros((height, width), dtype=bool), None
 
     hull = ConvexHull(np.stack([uv[:, 0], uv[:, 1]], axis=1))
-    poly = list(zip(uv[hull.vertices, 0], uv[hull.vertices, 1]))
+    poly = list(zip(uv[hull.vertices, 0], uv[hull.vertices, 1], strict=True))
     poly = [(float(x), float(y)) for x, y in poly]
     img = Image.new("L", (width, height), 0)
     ImageDraw.Draw(img).polygon(poly, fill=255)
@@ -80,7 +78,7 @@ def confidence_map(
     mask,
     max_depth: float = 200.0,
     sigma: float = DEFAULT_SIGMA,
-) -> tuple:
+) -> tuple[np.ndarray, np.ndarray]:
     """Alpha-derived confidence field clipped to ``mask``.
 
     Returns ``(conf, uv)``.  ``conf`` is float32 [0,1], 0 outside ``mask``.

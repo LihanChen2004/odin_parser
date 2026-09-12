@@ -125,7 +125,9 @@ def estimate_pose_offset(
 
     def mean_score(off: float) -> float | None:
         scores = []
-        for k, (im, cld, (tcl, til)) in zip(indices, zip(images, clouds, calibs)):
+        for k, (im, cld, (tcl, til)) in zip(
+            indices, zip(images, clouds, calibs, strict=True), strict=True
+        ):
             pose = _pose_at_fraction(read_pose, float(k) + off, cache)
             s = _score_frame(pose, im, cld, til, tcl, camera, max_depth)
             if s is not None:
@@ -140,23 +142,22 @@ def estimate_pose_offset(
 
     best_off, best_score = min(vals, key=lambda kv: kv[1])
 
-    # Sub-frame refinement: fit a parabola through best and its neighbours.
+    # Sub-frame refinement: fit a parabola through the best scan point and its
+    # two neighbours.
     refined = best_off
     by_off = dict(vals)
-    for d in (step, -step):
-        if (best_off - d) in by_off and (best_off + d) in by_off:
-            x0, y0 = best_off - d, by_off[best_off - d]
-            x1, y1 = best_off, best_score
-            x2, y2 = best_off + d, by_off[best_off + d]
-            denom = (x0 - x1) * (x0 - x2) * (x1 - x2)
-            if abs(denom) > 1e-12:
-                a = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / denom
-                b = (
-                    x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) + x0 * x0 * (y1 - y2)
-                ) / denom
-                if a != 0:
-                    refined = -b / (2.0 * a)
-            break
+    if (best_off - step) in by_off and (best_off + step) in by_off:
+        x0, y0 = best_off - step, by_off[best_off - step]
+        x1, y1 = best_off, best_score
+        x2, y2 = best_off + step, by_off[best_off + step]
+        denom = (x0 - x1) * (x0 - x2) * (x1 - x2)
+        if abs(denom) > 1e-12:
+            a = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / denom
+            b = (
+                x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) + x0 * x0 * (y1 - y2)
+            ) / denom
+            if a != 0:
+                refined = -b / (2.0 * a)
 
     # Ensure the refined point is not off the search range.
     refined = float(np.clip(refined, lo, hi))

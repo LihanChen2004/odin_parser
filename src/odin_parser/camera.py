@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .calib import Intrinsics
+from .calib import DEFAULT_DISTORTION, Intrinsics
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class PolynomialCamera:
     cx: float
     cy: float
     skew: float = 0.0
-    k: tuple = (0.0,) * 6
+    k: tuple[float, ...] = DEFAULT_DISTORTION
 
     @classmethod
     def from_intrinsics(cls, intr: Intrinsics) -> PolynomialCamera:

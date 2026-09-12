@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from .masks import DEFAULT_SIGMA
 from .output import ProcessSummary, write_dataset
 from .recording import OdinRecording
 
@@ -31,8 +32,8 @@ class ProcessOptions:
     pose_offset_range: tuple[float, float] = (-2.0, 2.0)  # search range when auto
     align_max_samples: int = 40  # frames sampled to estimate the pose offset
     generate_masks: bool = True  # emit per-frame LiDAR/RGB validity + confidence
-    mask_sigma: float = 40.0  # Gaussian sigma (px) for the confidence map
-    workers: int = 8  # parallel writer threads (frames are independent)
+    mask_sigma: float = DEFAULT_SIGMA  # Gaussian sigma (px) for the confidence map
+    workers: int = 8  # parallel writer processes (frames are independent)
     overwrite: bool = False
 
     def __post_init__(self):
@@ -91,10 +92,3 @@ def process_dataset(opts: ProcessOptions) -> ProcessSummary:
         )
     finally:
         rec.close()
-
-
-def clean_output(out_dir: str | Path) -> None:
-    """Remove a processed output tree."""
-    import shutil
-
-    shutil.rmtree(out_dir, ignore_errors=True)

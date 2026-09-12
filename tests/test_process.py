@@ -1,133 +1,18 @@
 """End-to-end test of the processing pipeline on a synthetic origin dir."""
 
 import gzip
+import json
 import pickle
-import struct
-from pathlib import Path
 
 import numpy as np
+import pytest
 
+from odin_parser import OdinRecording
+from odin_parser.output import write_dataset
 from odin_parser.process import ProcessOptions, process_dataset
 
 
-def make_origin(root: Path, n_cloud: int = 5, offset: int = 9, fps: float = 10.0):
-    """Build a small synthetic Odin1 recording directory.
-
-    cloud ts:      100 + i * dt
-    image ts:      (100 - offset*dt) + j * dt   -> image[j] ~ cloud[j - offset]
-    poses/rotate:  aligned with cloud ts
-    """
-    dt = 1.0 / fps
-    (root / "image").mkdir(parents=True)
-    info = "device=OdinOne\npointcloud=xyzrgbi\ncreated_at=20260424_231347\n"
-    (root / "image" / "info.txt").write_text(info)
-    (root / "image" / "cam_in_ex.txt").write_text(
-        "Tcl_0: [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, "
-        "0.0, 0.0, 0.0, 1.0]\n"
-        "cam_0:\n  image_width: 1600\n  image_height: 1296\n"
-        "  k2: 0.0\n  k3: 0.0\n  k4: 0.0\n  k5: 0.0\n  k6: 0.0\n  k7: 0.0\n"
-        "  A11: 500.0\n  A12: 0.0\n  A22: 500.0\n  u0: 800.0\n  v0: 648.0\n"
-    )
-
-    # calib_online.yaml: index i matches cloud index i
-    calib_blocks = []
-    for i in range(n_cloud):
-        ts = 100.0 + i * dt
-        tcl = [
-            1.0,
-            0.0,
-            0.0,
-            0.5,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        ]
-        til = [
-            1.0,
-            0.0,
-            0.0,
-            0.1,
-            0.0,
-            1.0,
-            0.0,
-            0.2,
-            0.0,
-            0.0,
-            1.0,
-            0.3,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        ]
-        calib_blocks.append(
-            f"frame:\n    index: {i}\n    timestamp: {ts:.10f}\n    cam_num: 1\n"
-            f"    Tcl_0: [{', '.join(map(str, tcl))}]\n\n"
-            f"    body_T_lidar: !!opencv-matrix\n       rows: 4\n       cols: 4\n"
-            f"       dt: d\n       data: [{', '.join(map(str, til))}]\n\n"
-        )
-    (root / "calib_online.yaml").write_text("".join(calib_blocks))
-
-    # pose stream (matches cloud ts)
-    pose = b""
-    for i in range(n_cloud):
-        pose += struct.pack(
-            "<Id7f", i, 100.0 + i * dt, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0
-        )
-    (root / "OdinPose.bin").write_bytes(pose)
-    (root / "OdinRotate.bin").write_bytes(
-        b"".join(
-            struct.pack("<Id4f", i, 100.0 + i * dt, 0, 0, 0, 1) for i in range(n_cloud)
-        )
-    )
-    (root / "OdinIMU.bin").write_bytes(
-        b"".join(
-            struct.pack("<d6f", 100.0 + i * 0.0025, 0, 0, 0, 0, 0, 0) for i in range(40)
-        )
-    )
-
-    # image stream (leads cloud by `offset` frames); real-size JPEG so that
-    # projected points land inside the image (needed by pose-offset estimation)
-    from io import BytesIO
-
-    from PIL import Image
-
-    n_img = n_cloud + offset
-    img = b""
-    for j in range(n_img):
-        ts = (100.0 - offset * dt) + j * dt
-        arr = np.zeros((1296, 1600, 3), dtype=np.uint8)
-        arr[:, :, 0] = np.arange(1600)[None, :] * 255 // 1600  # horizontal R gradient
-        arr[:, :, 1] = j * 40 % 256
-        arr[:, :, 2] = 128
-        buf = BytesIO()
-        Image.fromarray(arr).save(buf, format="JPEG")
-        payload = struct.pack("<IdI", j, ts, len(buf.getvalue())) + buf.getvalue()
-        img += payload
-    (root / "OdinImage.bin").write_bytes(img)
-
-    # cloud stream: 200 points in front of the camera so that pose-offset
-    # estimation can reproject them in-bounds (projection needs >=100 points).
-    cloud = b""
-    for i in range(n_cloud):
-        pts = b"".join(
-            struct.pack("<fffBBBB", 0.5 + 0.01 * j, 0.3, 8.0, 255, 0, 0, 200)
-            for j in range(200)
-        )
-        cloud += struct.pack("<IdI", i, 100.0 + i * dt, 200) + pts
-    (root / "MT20260424_231347.olx").write_bytes(cloud)
-
-
-def test_process_dataset(tmp_path):
+def test_process_dataset(tmp_path, make_origin):
     origin = tmp_path / "origin"
     out = tmp_path / "out"
     make_origin(origin)
@@ -136,7 +21,7 @@ def test_process_dataset(tmp_path):
         ProcessOptions(origin_dir=origin, out_dir=out, overwrite=True, pose_offset=0.0)
     )
     assert summary.num_frames == 5  # all cloud frames have a matching image
-    assert summary.dropped_frames == 9
+    assert summary.skipped_cloud_frames == 0
 
     cam_dir = out / "camera" / "front_camera"
     lidar_dir = out / "lidar"
@@ -169,16 +54,17 @@ def test_process_dataset(tmp_path):
     assert ds.info["masks"]["enabled"] is True
 
     # image/cloud alignment: output frame 0 <- cloud index 0, image index 9
-    poses = __import__("json").loads((cam_dir / "poses.json").read_text())
+    poses = json.loads((cam_dir / "poses.json").read_text())
     assert poses[0]["index"] == 0
     assert poses[0]["image_index"] == 9
 
     # camera pose = T_wi * til * inv(tcl)
-    # T_wi translation (1,2,3); til translation (0.1,0.2,0.3) -> lidar pose (1.1,2.2,3.3)
+    # T_wi translation (1,2,3); til translation (0.1,0.2,0.3)
+    #   -> lidar pose (1.1,2.2,3.3)
     # inv(tcl) translation (-0.5,0,0) -> camera pose (0.6, 2.2, 3.3)
     np.testing.assert_allclose(poses[0]["position"], [0.6, 2.2, 3.3], atol=1e-9)
 
-    lidar_poses = __import__("json").loads((lidar_dir / "poses.json").read_text())
+    lidar_poses = json.loads((lidar_dir / "poses.json").read_text())
     np.testing.assert_allclose(lidar_poses[0]["position"], [1.1, 2.2, 3.3], atol=1e-9)
 
     # point cloud round trip
@@ -188,7 +74,7 @@ def test_process_dataset(tmp_path):
     assert pts.dtype == np.float32
 
 
-def test_process_overwrite_guard(tmp_path):
+def test_process_overwrite_guard(tmp_path, make_origin):
     origin = tmp_path / "origin"
     out = tmp_path / "out"
     make_origin(origin)
@@ -200,7 +86,7 @@ def test_process_overwrite_guard(tmp_path):
         pass
 
 
-def test_process_no_masks(tmp_path):
+def test_process_no_masks(tmp_path, make_origin):
     origin = tmp_path / "origin"
     out = tmp_path / "out"
     make_origin(origin)
@@ -220,7 +106,7 @@ def test_process_no_masks(tmp_path):
     assert (cam_dir / "00000.jpg").exists()  # images still written
 
 
-def test_process_masks_sigma_zero(tmp_path):
+def test_process_masks_sigma_zero(tmp_path, make_origin):
     origin = tmp_path / "origin"
     out = tmp_path / "out"
     make_origin(origin)
@@ -242,3 +128,47 @@ def test_process_masks_sigma_zero(tmp_path):
         ds.intrinsics["image_width"],
     )
     assert float(conf.max()) <= 1.0 + 1e-6
+
+
+def test_write_dataset_index_matches_filename(tmp_path, make_origin):
+    """An emitted frame's JSON `index` must equal its file suffix, even when the
+    input mapping skips cloud frames."""
+    origin = tmp_path / "origin"
+    out = tmp_path / "out"
+    make_origin(origin)
+    rec = OdinRecording(origin)
+    try:
+        summary = write_dataset(
+            rec,
+            mapping={1: 10, 3: 12},  # cloud 0 and 2 are skipped
+            out_dir=out,
+            run_name=rec.run_name,
+            pose_offset=0.0,
+            overwrite=True,
+        )
+        assert summary.num_frames == 2
+        assert summary.skipped_cloud_frames == 3  # 5 cloud frames, 2 written
+
+        cam_dir = out / "camera" / "front_camera"
+        poses = json.loads((cam_dir / "poses.json").read_text())
+        assert [p["index"] for p in poses] == [0, 1]
+        assert [p["cloud_index"] for p in poses] == [1, 3]
+        tcl = json.loads((cam_dir / "tcl_frames.json").read_text())
+        assert [t["index"] for t in tcl] == [0, 1]
+        for k in (0, 1):
+            assert (cam_dir / f"{k:05d}.jpg").exists()
+            assert (out / "lidar" / f"{k:05d}.pkl.gz").exists()
+    finally:
+        rec.close()
+
+
+def test_process_missing_calib_fails_fast(tmp_path, make_origin):
+    origin = tmp_path / "origin"
+    out = tmp_path / "out"
+    make_origin(origin)
+    # Keep only the first frame's online calibration.
+    calib = (origin / "calib_online.yaml").read_text()
+    (origin / "calib_online.yaml").write_text("frame:" + calib.split("frame:")[1])
+
+    with pytest.raises(RuntimeError, match="online calibration"):
+        process_dataset(ProcessOptions(origin_dir=origin, out_dir=out, pose_offset=0.0))

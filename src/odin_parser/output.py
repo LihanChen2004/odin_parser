@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .masks import confidence_map, fov_mask
+from .masks import DEFAULT_SIGMA, confidence_map, fov_mask
 from .recording import DEFAULT_CAMERA_NAME, OdinRecording
 
 logger = logging.getLogger(__name__)
@@ -36,23 +36,36 @@ class ProcessSummary:
     num_frames: int
     cloud_points: int
     image_bytes: int
-    dropped_frames: int
-    missing_calib_frames: int
+    skipped_cloud_frames: int  # cloud frames in the recording not written out
     masked_frames: int = 0
 
 
-def _pose_record(index: int, timestamp: float, image_index, T: np.ndarray) -> dict:
+def _pose_record(
+    index: int,
+    cloud_index: int,
+    timestamp: float,
+    image_index: int | None,
+    T: np.ndarray,
+) -> dict:
     from .geometry import matrix_to_json, matrix_to_pose
 
     pos, quat = matrix_to_pose(T)
     return {
         "index": index,
+        "cloud_index": cloud_index,
         "timestamp": float(timestamp),
         "image_index": image_index,
         "position": [float(v) for v in pos],
         "quaternion": [float(v) for v in quat],
         "matrix": matrix_to_json(T),
     }
+
+
+def _calib_record(index: int, cloud_index: int, calib) -> dict:
+    record = calib.to_dict()
+    record["index"] = index
+    record["cloud_index"] = cloud_index
+    return record
 
 
 def _write_frame_payload(
@@ -104,7 +117,7 @@ def write_dataset(
     camera_name: str = DEFAULT_CAMERA_NAME,
     overwrite: bool = False,
     generate_masks: bool = True,
-    mask_sigma: float = 40.0,
+    mask_sigma: float = DEFAULT_SIGMA,
     workers: int = 8,
 ) -> ProcessSummary:
     """Write the recording's aligned frames to ``out_dir``.
@@ -138,10 +151,19 @@ def write_dataset(
         conf_dir.mkdir(parents=True, exist_ok=True)
 
     cloud_indices = sorted(mapping.keys())
+    # Fail fast if the online calibration is missing a frame we are about to
+    # write; otherwise the per-frame calib lookup would abort mid-write.
+    missing_calib = [i for i in cloud_indices if i not in rec.online]
+    if missing_calib:
+        raise RuntimeError(
+            f"online calibration {rec.calib_path.name} is missing "
+            f"{len(missing_calib)} frame(s) present in the recording "
+            f"(first: {missing_calib[0]}); cannot write {run_name}"
+        )
+
     num_frames = 0
     total_pts = 0
     total_img_bytes = 0
-    missing_calib = 0
     n_masks = 0
 
     camera_poses: list[dict] = []
@@ -149,8 +171,6 @@ def write_dataset(
     tcl_frames: list[dict] = []
 
     pending: deque = deque()
-    total_img_bytes = 0
-    total_pts = 0
     done = 0
     with ProcessPoolExecutor(max_workers=max(1, workers)) as pool:
 
@@ -168,11 +188,12 @@ def write_dataset(
                     logger.info("wrote %d/%d frames", done, len(cloud_indices))
 
         for frame in rec.iter_frames(cloud_indices, mapping, pose_offset):
-            if frame.jpeg is None:
-                continue  # frame has a cloud but no matched image
+            index = num_frames
+            num_frames += 1
             calib = frame.calib
             camera_poses.append(
                 _pose_record(
+                    index,
                     frame.cloud_index,
                     frame.timestamp,
                     frame.image_index,
@@ -181,16 +202,15 @@ def write_dataset(
             )
             lidar_poses.append(
                 _pose_record(
+                    index,
                     frame.cloud_index,
                     frame.timestamp,
                     None,
                     frame.lidar_pose,
                 )
             )
-            tcl_frames.append(calib.to_dict())
+            tcl_frames.append(_calib_record(index, frame.cloud_index, calib))
 
-            index = num_frames
-            num_frames += 1
             pending.append(
                 pool.submit(
                     _write_frame_payload,
@@ -235,7 +255,7 @@ def write_dataset(
         },
         "pose_offset": {
             "frames": pose_offset,
-            "description": "odometry pose is sampled at frame_index + pose_offset frames",
+            "description": "pose sampled at frame_index + pose_offset frames",
         },
         "masks": {
             "enabled": generate_masks,
@@ -243,8 +263,10 @@ def write_dataset(
             "sigma": mask_sigma,
             "mask_path": f"camera/{camera_name}/masks/{{index:05d}}.png",
             "confidence_path": f"camera/{camera_name}/confidence/{{index:05d}}.npy",
-            "description": "fov_mask: LiDAR dToF coverage hull (0/1); confidence: smoothed "
-            "alpha reliability in [0,1] (float16) clipped to the mask",
+            "description": (
+                "fov_mask: LiDAR dToF coverage hull (binary); confidence: "
+                "smoothed alpha reliability in [0,1] (float16) clipped to the mask"
+            ),
         },
         "transforms": {
             "T_wc": "camera pose in world = T_wi * T_il * inv(T_cl)",
@@ -259,7 +281,6 @@ def write_dataset(
         num_frames=num_frames,
         cloud_points=total_pts,
         image_bytes=total_img_bytes,
-        dropped_frames=len(rec.image_toc) - num_frames,
-        missing_calib_frames=missing_calib,
+        skipped_cloud_frames=rec.n_cloud - num_frames,
         masked_frames=n_masks,
     )

@@ -23,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .calib import DEFAULT_DISTORTION
+from .masks import DEFAULT_SIGMA
 from .process import ProcessOptions, process_dataset
 from .recording import find_streams
 from .streams import (
@@ -39,6 +41,16 @@ def _setup_logging(level: str) -> None:
     )
 
 
+def _print_frame_range(label: str, frames: list[tuple[int, float]]) -> None:
+    if not frames:
+        print(f"{label} frames: 0")
+        return
+    print(
+        f"{label} frames: {len(frames)}  first={frames[0][1]:.6f}  "
+        f"last={frames[-1][1]:.6f}"
+    )
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     origin = Path(args.origin)
     streams = find_streams(origin)
@@ -52,18 +64,22 @@ def cmd_info(args: argparse.Namespace) -> int:
         img = streams.get("OdinImage.bin")
         pose = streams.get("OdinPose.bin")
         cl = cloud_timestamps(cloud)
-        print(f"\ncloud frames: {len(cl)}  first={cl[0][1]:.6f}  last={cl[-1][1]:.6f}")
+        print()
+        _print_frame_range("cloud", cl)
         if img:
             im = image_timestamps(img)
-            print(
-                f"image frames: {len(im)}  first={im[0][1]:.6f}  last={im[-1][1]:.6f}"
-            )
-            dt = im[0][1] - cl[0][1]
-            dt_frame = (im[1][1] - im[0][1]) if len(im) > 1 else 0.0
-            lead = round(dt / dt_frame) if dt_frame else 0
-            print(
-                f"image stream leads cloud by {dt:+.4f} s (~{lead} frames at {1 / dt_frame:.1f} Hz)"
-            )
+            _print_frame_range("image", im)
+            if cl and im:
+                dt = im[0][1] - cl[0][1]
+                dt_frame = (im[1][1] - im[0][1]) if len(im) > 1 else 0.0
+                if dt_frame:
+                    lead = round(dt / dt_frame)
+                    print(
+                        f"image stream leads cloud by {dt:+.4f} s "
+                        f"(~{lead} frames at {1 / dt_frame:.1f} Hz)"
+                    )
+                else:
+                    print(f"image stream leads cloud by {dt:+.4f} s")
         if pose:
             print(f"pose frame size: {POSE_HDR_SIZE} bytes")
     calib = origin / "calib_online.yaml"
@@ -114,7 +130,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         cx=intr["cx"],
         cy=intr["cy"],
         skew=intr.get("skew", 0.0),
-        k=tuple(intr.get("distortion_coefficients", (0.0,) * 6)),
+        k=tuple(intr.get("distortion_coefficients", DEFAULT_DISTORTION)),
     )
     img = np.asarray(ds.image(args.frame))
     cloud = ds.point_cloud(args.frame)
@@ -160,28 +176,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="limit number of frames (for testing)",
     )
     p_proc.add_argument(
-        "--generate-masks",
-        action="store_true",
-        default=True,
-        help="emit per-frame mask/confidence (default on)",
-    )
-    p_proc.add_argument(
-        "--no-masks",
+        "--masks",
         dest="generate_masks",
-        action="store_false",
-        help="skip per-frame mask/confidence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="emit per-frame mask/confidence (default on; --no-masks to skip)",
     )
     p_proc.add_argument(
         "--mask-sigma",
         type=float,
-        default=40.0,
+        default=DEFAULT_SIGMA,
         help="Gaussian sigma (px) for the confidence map",
     )
     p_proc.add_argument(
         "--workers",
         type=int,
         default=8,
-        help="parallel writer threads",
+        help="parallel writer processes",
     )
     p_proc.add_argument("--overwrite", action="store_true")
 
@@ -206,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command](args)
-    except Exception as exc:  # noqa: BLE001 - report nicely at the CLI boundary
+    except Exception as exc:
         logging.getLogger("cli").error("%s", exc)
         return 1
 

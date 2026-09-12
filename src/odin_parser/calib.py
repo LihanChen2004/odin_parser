@@ -25,7 +25,7 @@ Coordinate semantics were validated empirically against the recorded data
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -35,16 +35,20 @@ from .geometry import Mat4
 
 Mat4x4 = Mat4
 
+# Polynomial distortion coefficients (k2..k7) used when a calibration file does
+# not provide them.
+DEFAULT_DISTORTION: tuple[float, ...] = (0.0,) * 6
+
 
 @dataclass(frozen=True)
 class Intrinsics:
     """Static polynomial (equidistant) camera intrinsics.
 
-    ``k`` holds the polynomial coefficients ``[k1, k2, ..., k7]``; the Odin1
-    driver reports only ``k2..k7`` (k1 is treated as 0), and the undistorted
-    polar angle is::
+    ``k`` holds the six polynomial coefficients ``[k2, k3, k4, k5, k6, k7]``
+    (the device does not report ``k1``), applied to increasing powers of the
+    polar angle::
 
-        theta_d = theta + k1*theta^2 + k2*theta^3 + ... + k7*theta^8
+        theta_d = theta + k2*theta^2 + k3*theta^3 + ... + k7*theta^7
 
     The driver uses ``k2..k7`` exactly as listed here.
     """
@@ -57,7 +61,7 @@ class Intrinsics:
     cx: float = 0.0
     cy: float = 0.0
     skew: float = 0.0
-    k: tuple[float, ...] = field(default_factory=lambda: (0.0,) * 6)
+    k: tuple[float, ...] = DEFAULT_DISTORTION
     Tcl_0_static: np.ndarray | None = None
 
     @property
@@ -146,6 +150,8 @@ def parse_online_calib(path: str | Path) -> dict[int, CalibFrame]:
     SLAM pose / cloud index 1:1 (verified: identical timestamps).
     """
     text = Path(path).read_text()
+    # Normalise line endings so the block split below also matches CRLF files.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     # Split on lines that begin a new frame block.  Re-indent each block under
     # a synthetic "frame:" key so its nested fields stay valid YAML.
     blocks = re.split(r"^frame:\n", text, flags=re.MULTILINE)

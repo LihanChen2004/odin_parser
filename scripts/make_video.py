@@ -19,6 +19,7 @@ import subprocess
 import numpy as np
 
 from odin_parser import OdinDataset
+from odin_parser.calib import DEFAULT_DISTORTION
 from odin_parser.camera import PolynomialCamera
 from odin_parser.visualize import (
     DEFAULT_ALPHA,
@@ -52,7 +53,7 @@ def main() -> int:
         cx=intr["cx"],
         cy=intr["cy"],
         skew=intr.get("skew", 0.0),
-        k=tuple(intr.get("distortion_coefficients", (0.0,) * 6)),
+        k=tuple(intr.get("distortion_coefficients", DEFAULT_DISTORTION)),
     )
     ts = [p["timestamp"] for p in ds.camera_poses]
     base_fps = (len(ts) - 1) / (ts[-1] - ts[0])

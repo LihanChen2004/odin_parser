@@ -84,7 +84,7 @@ class OdinDataset:
         return np.asarray(Image.open(self.mask_path(frame)).convert("L")) > 0
 
     def confidence(self, frame: int) -> np.ndarray:
-        """Load the per-frame alpha confidence map (float32 HxW in [0,1])."""
+        """Load the per-frame alpha confidence map (float16 HxW in [0,1])."""
         return np.load(self.confidence_path(frame))
 
     def mask_path(self, frame: int) -> Path:

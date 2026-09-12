@@ -51,9 +51,9 @@ class SyncedFrame:
     calib: CalibFrame
 
 
-def find_streams(origin_dir: Path) -> dict:
+def find_streams(origin_dir: Path) -> dict[str, Path]:
     """Locate the binary streams inside a recording directory."""
-    found: dict = {}
+    found: dict[str, Path] = {}
     for p in sorted(Path(origin_dir).rglob("*")):
         if not p.is_file():
             continue
@@ -80,19 +80,19 @@ class OdinRecording:
     def __init__(self, origin_dir: str | Path):
         self.root = Path(origin_dir)
         self.streams_map = find_streams(self.root)
-        missing = [
-            k
-            for k in ("cloud", IMAGE_STREAM, POSE_STREAM, ROTATE_STREAM, IMU_STREAM)
-            if k not in self.streams_map
-        ]
+        # Only cloud/image/pose are needed by the pipeline.  Rotate (WIWC) and
+        # IMU are parsed by this module's readers but unused here, so a
+        # recording that omits them stays readable.
+        required = ("cloud", IMAGE_STREAM, POSE_STREAM)
+        missing = [k for k in required if k not in self.streams_map]
         if missing:
             raise FileNotFoundError(f"missing streams in {self.root}: {missing}")
 
         self.image_path = self.streams_map[IMAGE_STREAM]
         self.pose_path = self.streams_map[POSE_STREAM]
         self.cloud_path = self.streams_map["cloud"]
-        self.rotate_path = self.streams_map[ROTATE_STREAM]
-        self.imu_path = self.streams_map[IMU_STREAM]
+        self.rotate_path = self.streams_map.get(ROTATE_STREAM)
+        self.imu_path = self.streams_map.get(IMU_STREAM)
         self.calib_path = self.root / "calib_online.yaml"
         self.intr_path = self.root / "image" / "cam_in_ex.txt"
         self.info_path = self.root / "image" / "info.txt"
@@ -191,7 +191,10 @@ class OdinRecording:
     def calib(self, index: int) -> CalibFrame:
         c = self.online.get(index)
         if c is None:
-            raise KeyError(f"no online calib for frame {index}")
+            raise KeyError(
+                f"online calibration has no frame {index} "
+                f"({self.calib_path.name} has {len(self.online)} frames)"
+            )
         return c
 
     def camera_model(self) -> PolynomialCamera:
@@ -254,23 +257,21 @@ class OdinRecording:
         """Yield ``SyncedFrame`` for each cloud index in ``cloud_indices``.
 
         ``mapping`` is ``{cloud_index: image_index}`` (from ``align``) and
-        ``pose_offset`` shifts the odometry pose by a fraction of a frame.  The
-        ``SyncedFrame.jpeg`` is filled only if the paired image frame exists.
+        ``pose_offset`` shifts the odometry pose by a fraction of a frame.
+        Every index in ``cloud_indices`` must be present in ``mapping``.
         """
         img_idx = streams.ImageIndex(self.image_path, self.image_toc)
         cl_idx = streams.CloudIndex(self.cloud_path, self.cloud_toc)
         try:
             for cloud_index in cloud_indices:
-                image_index = mapping.get(cloud_index)
+                image_index = mapping[cloud_index]
                 calib = self.calib(cloud_index)
                 points = cl_idx.read(cloud_index)
-                jpeg = None
-                if image_index is not None:
-                    jpeg = img_idx.read(image_index)[2]
+                jpeg = img_idx.read(image_index)[2]
                 yield SyncedFrame(
                     cloud_index=cloud_index,
                     image_index=image_index,
-                    timestamp=self.cloud_toc[cloud_index].timestamp,
+                    timestamp=cl_idx.entry(cloud_index).timestamp,
                     jpeg=jpeg,
                     points=points,
                     camera_pose=self.camera_pose(cloud_index, pose_offset),

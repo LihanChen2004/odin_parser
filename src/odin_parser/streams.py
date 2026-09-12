@@ -15,7 +15,7 @@ Image stream (``OdinImage.bin``) - variable length frame::
 Pose stream (``OdinPose.bin``) - fixed 40-byte frame::
 
     uint32 frame_index, float64 timestamp_sec,
-    float32 x, y, z, qx, qy, qz, qw       # odom->imu, pos in m, quat
+    float32 x, y, z, qx, qy, qz, qw       # world_from_imu, pos in m, quat
 
 Rotate stream (``OdinRotate.bin``) - fixed 28-byte frame::
 
@@ -32,6 +32,16 @@ SLAM cloud stream (``MT<run>.olx``) - variable length frame::
     then num_points * 16 bytes: (float32 x, y, z) + (uint8 r, g, b, a)
 
 The cloud points are already expressed in the SLAM odometry (world) frame.
+
+Two reader shapes are offered on purpose:
+
+- the **streaming** generators (``read_*_stream``) walk a file once and are
+  the tool for extension passes that stay inside a bounded memory budget;
+- the **random-access** indexes (``build_*_toc`` + ``*Index``) build a
+  header-only table once and then serve individual frames by seek.
+
+Both are built on :func:`iter_frame_spans`, so the header layout and the
+"ignore a truncated trailing frame" rule live in exactly one place.
 """
 
 from __future__ import annotations
@@ -89,12 +99,12 @@ class CloudFrame:
 
 @dataclass(frozen=True)
 class PoseFrame:
-    """One odometry pose: world->imu position + unit quaternion."""
+    """One odometry pose: world_from_imu position + unit quaternion."""
 
     index: int
     timestamp: float
-    position: np.ndarray  # (3,) float32
-    quaternion: np.ndarray  # (4,) float32 x,y,z,w
+    position: np.ndarray  # (3,) float64
+    quaternion: np.ndarray  # (4,) float64 x,y,z,w
 
 
 @dataclass(frozen=True)
@@ -103,7 +113,7 @@ class RotateFrame:
 
     index: int
     timestamp: float
-    quaternion: np.ndarray  # (4,) float32 x,y,z,w
+    quaternion: np.ndarray  # (4,) float64 x,y,z,w
 
 
 @dataclass(frozen=True)
@@ -122,6 +132,61 @@ def _open(path) -> BinaryIO:
     return open(path, "rb")
 
 
+# ---------------------------------------------------------------------------
+# Frame framing (the single header-scanning seam)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class FrameSpan:
+    """One variable-length frame's header fields and payload location."""
+
+    index: int
+    timestamp: float
+    count: int  # payload units: jpeg bytes (image) or number of points (cloud)
+    offset: int  # byte offset of the payload
+    length: int  # payload length in bytes
+
+
+def iter_frame_spans(
+    path: str | Path, hdr: struct.Struct, unit_size: int
+) -> Iterator[FrameSpan]:
+    """Walk a header-prefixed stream without loading payloads.
+
+    ``hdr`` unpacks to ``(index, timestamp, count)``; the payload is
+    ``count * unit_size`` bytes.  A truncated trailing frame is skipped, so
+    every yielded span is fully present in the file.
+    """
+    total = Path(path).stat().st_size
+    with _open(path) as f:
+        while True:
+            raw = f.read(hdr.size)
+            if len(raw) < hdr.size:
+                break
+            index, ts, count = hdr.unpack(raw)
+            offset = f.tell()
+            length = count * unit_size
+            if offset + length > total:
+                break  # truncated final frame
+            f.seek(offset + length)
+            yield FrameSpan(index, ts, count, offset, length)
+
+
+def _read_span_payload(f: BinaryIO, span: FrameSpan) -> bytes:
+    f.seek(span.offset)
+    return f.read(span.length)
+
+
+def _decode_cloud_payload(raw: bytes, count: int) -> np.ndarray:
+    """Decode raw cloud bytes into an (count, 7) float32 array."""
+    rec = np.frombuffer(raw, dtype=CLOUD_POINT_DTYPE)
+    points = np.empty((count, 7), dtype=np.float32)
+    points[:, 0:3] = rec["xyz"]
+    points[:, 3:7] = rec["rgba"].astype(np.float32)
+    return points
+
+
+# ---------------------------------------------------------------------------
+# Streaming readers (one pass, bounded memory)
+# ---------------------------------------------------------------------------
 def read_image_stream(path: str | Path) -> Iterator[ImageFrame]:
     """Yield image frames without buffering the whole file.
 
@@ -130,37 +195,18 @@ def read_image_stream(path: str | Path) -> Iterator[ImageFrame]:
     ``cv2``, ...).
     """
     with _open(path) as f:
-        while True:
-            hdr = f.read(_IMAGE_HDR.size)
-            if len(hdr) < _IMAGE_HDR.size:
-                break
-            index, ts, size = _IMAGE_HDR.unpack(hdr)
-            jpeg = f.read(size)
-            if len(jpeg) < size:
-                break  # truncated final frame
-            yield ImageFrame(index, ts, jpeg)
+        for span in iter_frame_spans(path, _IMAGE_HDR, 1):
+            yield ImageFrame(span.index, span.timestamp, _read_span_payload(f, span))
 
 
 def read_cloud_stream(path: str | Path) -> Iterator[CloudFrame]:
-    """Yield SLAM cloud frames as (N, 7) float32 arrays.
-
-    ``np.frombuffer`` views the raw bytes directly (no copy); the per-frame
-    conversion to a float32 (N,7) array allocates a fresh array of ~N*28 bytes.
-    """
+    """Yield SLAM cloud frames as (N, 7) float32 arrays."""
     with _open(path) as f:
-        while True:
-            hdr = f.read(_CLOUD_HDR.size)
-            if len(hdr) < _CLOUD_HDR.size:
-                break
-            index, ts, n = _CLOUD_HDR.unpack(hdr)
-            raw = f.read(n * CLOUD_POINT_SIZE)
-            if len(raw) < n * CLOUD_POINT_SIZE:
-                break
-            rec = np.frombuffer(raw, dtype=CLOUD_POINT_DTYPE)
-            points = np.empty((n, 7), dtype=np.float32)
-            points[:, 0:3] = rec["xyz"]
-            points[:, 3:7] = rec["rgba"].astype(np.float32)
-            yield CloudFrame(index, ts, points)
+        for span in iter_frame_spans(path, _CLOUD_HDR, CLOUD_POINT_SIZE):
+            raw = _read_span_payload(f, span)
+            yield CloudFrame(
+                span.index, span.timestamp, _decode_cloud_payload(raw, span.count)
+            )
 
 
 def read_pose_stream(path: str | Path) -> Iterator[PoseFrame]:
@@ -174,8 +220,8 @@ def read_pose_stream(path: str | Path) -> Iterator[PoseFrame]:
             yield PoseFrame(
                 index,
                 ts,
-                np.array([x, y, z], dtype=np.float32),
-                np.array([qx, qy, qz, qw], dtype=np.float32),
+                np.array([x, y, z], dtype=np.float64),
+                np.array([qx, qy, qz, qw], dtype=np.float64),
             )
 
 
@@ -187,7 +233,7 @@ def read_rotate_stream(path: str | Path) -> Iterator[RotateFrame]:
             if len(raw) < _ROTATE_HDR.size:
                 break
             index, ts, qx, qy, qz, qw = _ROTATE_HDR.unpack(raw)
-            yield RotateFrame(index, ts, np.array([qx, qy, qz, qw], dtype=np.float32))
+            yield RotateFrame(index, ts, np.array([qx, qy, qz, qw], dtype=np.float64))
 
 
 def read_imu_stream(path: str | Path) -> Iterator[ImuFrame]:
@@ -205,33 +251,17 @@ def read_imu_stream(path: str | Path) -> Iterator[ImuFrame]:
             )
 
 
-def _stream_timestamps_and_sizes(
-    path: str | Path, hdr: struct.Struct, payload_size: int
-) -> list[tuple[int, float]]:
-    """Scan a stream, returning [(index, timestamp), ...] without payloads.
-
-    Used for alignment passes over large files without reading the payload.
-    """
-    out: list[tuple[int, float]] = []
-    with _open(path) as f:
-        while True:
-            raw = f.read(hdr.size)
-            if len(raw) < hdr.size:
-                break
-            index, ts, size = hdr.unpack(raw)
-            f.seek(size * payload_size, 1)
-            out.append((index, ts))
-    return out
-
-
 def image_timestamps(path: str | Path) -> list[tuple[int, float]]:
     """[(index, timestamp), ...] for the image stream (payload skipped)."""
-    return _stream_timestamps_and_sizes(path, _IMAGE_HDR, 1)
+    return [(s.index, s.timestamp) for s in iter_frame_spans(path, _IMAGE_HDR, 1)]
 
 
 def cloud_timestamps(path: str | Path) -> list[tuple[int, float]]:
     """[(index, timestamp), ...] for the cloud stream (payload skipped)."""
-    return _stream_timestamps_and_sizes(path, _CLOUD_HDR, CLOUD_POINT_SIZE)
+    return [
+        (s.index, s.timestamp)
+        for s in iter_frame_spans(path, _CLOUD_HDR, CLOUD_POINT_SIZE)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -251,44 +281,21 @@ class StreamToc:
     byte_length: int
     count: int  # payload units: jpeg bytes (image) or number of points (cloud)
 
-    @property
-    def frame_index(self) -> int:
-        return self.index
-
-    @property
-    def payload(self) -> int:
-        return self.count
-
 
 def build_image_toc(path: str | Path) -> list[StreamToc]:
     """Header-only TOC for the image stream."""
-    toc: list[StreamToc] = []
-    with _open(path) as f:
-        while True:
-            raw = f.read(_IMAGE_HDR.size)
-            if len(raw) < _IMAGE_HDR.size:
-                break
-            idx, ts, size = _IMAGE_HDR.unpack(raw)
-            off = f.tell()
-            toc.append(StreamToc(idx, ts, off, size, size))
-            f.seek(size, 1)
-    return toc
+    return [
+        StreamToc(s.index, s.timestamp, s.offset, s.length, s.count)
+        for s in iter_frame_spans(path, _IMAGE_HDR, 1)
+    ]
 
 
 def build_cloud_toc(path: str | Path) -> list[StreamToc]:
     """Header-only TOC for the SLAM cloud stream."""
-    toc: list[StreamToc] = []
-    with _open(path) as f:
-        while True:
-            raw = f.read(_CLOUD_HDR.size)
-            if len(raw) < _CLOUD_HDR.size:
-                break
-            idx, ts, n = _CLOUD_HDR.unpack(raw)
-            off = f.tell()
-            byte_len = n * CLOUD_POINT_SIZE
-            toc.append(StreamToc(idx, ts, off, byte_len, n))
-            f.seek(byte_len, 1)
-    return toc
+    return [
+        StreamToc(s.index, s.timestamp, s.offset, s.length, s.count)
+        for s in iter_frame_spans(path, _CLOUD_HDR, CLOUD_POINT_SIZE)
+    ]
 
 
 class StreamIndex:
@@ -337,12 +344,7 @@ class CloudIndex(StreamIndex):
 
     def read(self, index: int) -> np.ndarray:
         e = self.entry(index)
-        raw = self.read_bytes(index)
-        rec = np.frombuffer(raw, dtype=CLOUD_POINT_DTYPE)
-        points = np.empty((e.count, 7), dtype=np.float32)
-        points[:, 0:3] = rec["xyz"]
-        points[:, 3:7] = rec["rgba"].astype(np.float32)
-        return points
+        return _decode_cloud_payload(self.read_bytes(index), e.count)
 
 
 class PoseIndex(StreamIndex):

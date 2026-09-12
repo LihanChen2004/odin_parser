@@ -21,9 +21,11 @@ Public API
 - :func:`odin_parser.process.process_dataset` - run the full pipeline.
 - :class:`odin_parser.dataset.OdinDataset` - read a processed dataset back.
 - Command line: ``odin-parser info|process|preview ...`` (see ``cli.py``).
+
+Only the names below are public; the other modules are implementation details
+and may change without notice.
 """
 
-from . import align, calib, camera, geometry, streams, sync, visualize
 from .dataset import FrameRecord, OdinDataset
 from .process import ProcessOptions, process_dataset
 from .recording import OdinRecording
@@ -35,12 +37,5 @@ __all__ = [
     "OdinRecording",
     "ProcessOptions",
     "__version__",
-    "align",
-    "calib",
-    "camera",
-    "geometry",
     "process_dataset",
-    "streams",
-    "sync",
-    "visualize",
 ]

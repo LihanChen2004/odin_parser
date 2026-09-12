@@ -5,7 +5,10 @@ import struct
 import numpy as np
 
 from odin_parser.streams import (
+    CLOUD_POINT_DTYPE,
     CLOUD_POINT_SIZE,
+    build_cloud_toc,
+    cloud_timestamps,
     read_cloud_stream,
     read_image_stream,
     read_imu_stream,
@@ -103,5 +106,33 @@ def test_truncated_tail_ignored(tmp_path):
     assert len(list(read_pose_stream(p))) == 1
 
 
-def test_cloud_point_size_consistency():
-    assert CLOUD_POINT_SIZE == 3 * 4 + 4 * 1 == 16
+def test_cloud_point_size_matches_dtype():
+    # Derive the size from the numpy dtype so a layout change is caught.
+    assert CLOUD_POINT_DTYPE.itemsize == CLOUD_POINT_SIZE
+
+
+def test_cloud_toc_matches_streaming_read(tmp_path):
+    """The TOC and the streaming reader must agree on framing."""
+    p = tmp_path / "MT20260424_231347.olx"
+    pt = struct.pack("<fffBBBB", 1.0, 2.0, 3.0, 10, 20, 30, 40)
+    frame0 = struct.pack("<IdI", 0, 147.0, 2) + pt + pt
+    frame1 = struct.pack("<IdI", 1, 147.1, 1) + pt
+    _write(str(p), [frame0, frame1])
+
+    toc = build_cloud_toc(p)
+    assert [(t.index, t.timestamp, t.count) for t in toc] == [
+        (0, 147.0, 2),
+        (1, 147.1, 1),
+    ]
+    assert cloud_timestamps(p) == [(0, 147.0), (1, 147.1)]
+
+
+def test_variable_stream_truncated_tail_ignored(tmp_path):
+    p = tmp_path / "MT20260424_231347.olx"
+    pt = struct.pack("<fffBBBB", 1.0, 2.0, 3.0, 10, 20, 30, 40)
+    good = struct.pack("<IdI", 0, 147.0, 1) + pt
+    truncated = struct.pack("<IdI", 1, 147.1, 1) + pt[:8]  # payload cut short
+    _write(str(p), [good, truncated])
+
+    assert [f.index for f in read_cloud_stream(p)] == [0]
+    assert [t.index for t in build_cloud_toc(p)] == [0]
