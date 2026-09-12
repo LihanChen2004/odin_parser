@@ -20,3 +20,27 @@ jobs:
         run: uv sync
       - name: Test
         run: uv run pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Lint
+        run: uvx ruff check src tests scripts
+      - name: Format check
+        run: uvx ruff format --check src tests scripts
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Install the wheel and import it
+        run: |
+          uv venv --python 3.11 /tmp/smoke
+          VIRTUAL_ENV=/tmp/smoke uv pip install dist/*.whl
+          /tmp/smoke/bin/python -c "import odin_parser; print(odin_parser.__version__)"
+          /tmp/smoke/bin/odin-parser --help >/dev/null

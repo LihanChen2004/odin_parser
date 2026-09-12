@@ -1,10 +1,32 @@
 [project]
 name = "odin-parser"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Parser for ManifoldTech Odin1 private binary datasets -> PandaSet-style output for gsplat"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [{ name = "LihanChen2004", email = "757003373@qq.com" }]
+maintainers = [{ name = "LihanChen2004", email = "757003373@qq.com" }]
+keywords = [
+    "odin1",
+    "manifoldtech",
+    "lidar",
+    "point-cloud",
+    "slam",
+    "dataset",
+    "gsplat",
+    "3d-gaussian-splatting",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "numpy>=1.26",
     "pillow>=10.0",
@@ -12,21 +34,39 @@ dependencies = [
     "scipy>=1.17.1",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=8"]
+[project.urls]
+Homepage = "https://github.com/LihanChen2004/odin_parser"
+Repository = "https://github.com/LihanChen2004/odin_parser"
+Issues = "https://github.com/LihanChen2004/odin_parser/issues"
 
 [project.scripts]
 odin-parser = "odin_parser.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.dynamic]
+version = { attr = "odin_parser.version.__version__" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+# ruff-format owns code line length; E501 also flags long strings/comments the
+# formatter cannot wrap, so it only produces noise here.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["odin_parser"]
 
 [dependency-groups]
 dev = [
